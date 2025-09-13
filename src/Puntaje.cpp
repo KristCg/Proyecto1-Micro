@@ -54,16 +54,17 @@ static inline string fg(int r, int g, int b) {
 static inline string resetCode() { return USE_COLOR ? "\x1b[0m" : ""; }
 
 static const vector<string> BEE = {
-    " /\\_/\\ ",
-    "(=o o=)",
-    " \\_-_/ "
+    "O O O",
+    " OOO ",
+    "  O  "
 };
 
 static const vector<string> PLAYER = {
     "   ^   ",
     "  /|\\  ",
     " /_|_\\ ",
-    "   |   "
+    "|_   _|",
+    "  | |  "
 };
 
 static int interiorWidth() { return max(0, SCREEN_W - 2); }
