@@ -3,9 +3,9 @@
 Un juego estilo Galaga en C++ usando ncurses y POSIX threads.
 
 
-## Utilizar los siguientes comandos para probar el juego: 
+## Utilizar los siguientes comandos (adentro del directorio donde se encuentra el archivo .cpp) para probar el juego: 
 
-### Compilar
+### Compilar 
 ```
 make
 ```
