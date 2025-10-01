@@ -15,14 +15,19 @@
 #include <vector>
 
 constexpr int MAX_BULLETS = 64;
-constexpr int MAX_ENEMIES = 32;
-constexpr int MAX_GAME_LEVELS = 3;
+constexpr int MAX_ENEMIES = 64;
+constexpr int MAX_GAME_MODES = 2;
 
 constexpr float PLAYER_MOVEMENT_SPEED = 1.2f;
 constexpr float PLAYER_BULLET_SPEED = 0.8f;
 constexpr float ENEMY_BULLET_SPEED = 0.6f;
-constexpr int BASE_ENEMY_ROWS = 2;
-constexpr int ENEMY_COLUMNS = 8;
+
+// Configuración para los dos modos de juego
+constexpr int MODE1_TOTAL_ENEMIES = 40;
+constexpr int MODE2_TOTAL_ENEMIES = 50;
+constexpr int MODE1_GROUP_SIZE = 8;
+constexpr int MODE2_GROUP_SIZE = 10;
+constexpr int GROUPS_PER_MODE = 5;
 constexpr int ENEMY_MOVEMENT_INTERVAL = 8;
 constexpr int ENEMY_SHOOTING_PROBABILITY =
     6; // Probabilidad de que dispare un enemigo.
@@ -58,7 +63,10 @@ static int MAX_ENEMY_Y = 0;
 static std::atomic<bool> game_running{true};
 static int player_score = 0;
 static int player_lives = 3;
-static int current_level = 1;
+static int game_mode = 1;
+static int current_group = 0;
+static int enemies_destroyed = 0;
+static int enemies_in_current_group = 0;
 static bool game_completed = false;
 static std::atomic<bool> player_hit{false};
 static long long damage_flash_start_ms = 0;
@@ -170,8 +178,16 @@ static void update_highscores_if_needed(int sc) {
   saved_highscore = hs[0];
 }
 
-// Inicializa el estado del juego y configura la pantalla
+// Inicializa el modo de juego seleccionado
+void init_game_mode(int mode) {
+  game_mode = mode;
+  current_group = 0;
+  enemies_destroyed = 0;
+  enemies_in_current_group = 0;
+  game_completed = false;
+}
 
+// Inicializa el estado del juego y configura la pantalla
 void init_game() {
   getmaxyx(stdscr, screen_h, screen_w);
   clear();
@@ -189,8 +205,6 @@ void init_game() {
   std::srand(static_cast<unsigned>(std::time(nullptr)));
   player_score = 0;
   player_lives = 3;
-  current_level = 1;
-  game_completed = false;
   game_running = true;
   player_hit = false;
   enemy_stop_descent.store(false);
@@ -204,24 +218,35 @@ void init_game() {
   MAX_ENEMY_Y = std::max(2, screen_h / 2 - ENEMY_H);
 }
 
-// Genera enemigos en formación para el nivel especificado
+// Genera enemigos en formación para el grupo especificado en el modo actual
+void spawn_enemies(int group_num) {
+  (void)group_num;
+  int group_size = (game_mode == 1) ? MODE1_GROUP_SIZE : MODE2_GROUP_SIZE;
+  int enemies_per_row = (game_mode == 1) ? 4 : 5;
+  int rows = 2;
 
-void spawn_enemies(int lvl) {
-  int rows = BASE_ENEMY_ROWS + lvl / 2;
-  int cols = ENEMY_COLUMNS;
   int idx = 0;
-  for (int r = 0; r < rows && idx < MAX_ENEMIES; r++) {
-    for (int c = 0; c < cols && idx < MAX_ENEMIES; c++) {
+
+  // Limpiar enemigos anteriores
+  for (int i = 0; i < MAX_ENEMIES; i++) {
+    enemies[i].alive = false;
+  }
+
+  for (int r = 0; r < rows && idx < group_size; r++) {
+    for (int c = 0; c < enemies_per_row && idx < group_size; c++) {
       enemies[idx].alive = true;
-      enemies[idx].x = 2 + c * static_cast<float>((screen_w - 4)) / cols;
+      enemies[idx].x =
+          2 + c * static_cast<float>((screen_w - 4)) / enemies_per_row;
       enemies[idx].y = 2 + r * (ENEMY_H + 1);
+      enemies[idx].row = r;
       idx++;
     }
   }
+
+  enemies_in_current_group = group_size;
 }
 
-// Reinicia el nivel actual
-
+// Reinicia el grupo actual
 void reset_level() {
   for (int i = 0; i < MAX_BULLETS; i++) {
     bullets[i].active = false;
@@ -231,7 +256,7 @@ void reset_level() {
     ebullets[i].x = 0;
     ebullets[i].y = 0;
   }
-  spawn_enemies(current_level);
+  spawn_enemies(current_group);
   enemy_stop_descent.store(false);
 }
 
@@ -306,6 +331,8 @@ void *player_bullet_collision_thread(void *arg) {
                 {
                   std::lock_guard<std::mutex> score_lock(score_mutex);
                   player_score += 10;
+                  enemies_destroyed++;
+                  enemies_in_current_group--;
                 }
               }
             }
@@ -448,8 +475,9 @@ void *enemy_bullet_collision_thread(void *arg) {
 }
 
 /**
- * Hilo 7: Verificador de completación
- * Verifica si todos los enemigos han sido eliminados para avanzar
+ * Hilo 7: Verificador de completación de grupos
+ * Verifica si todos los enemigos del grupo han sido eliminados y maneja el
+ * progreso del juego
  */
 void *level_completion_checker_thread(void *arg) {
   (void)arg;
@@ -464,17 +492,28 @@ void *level_completion_checker_thread(void *arg) {
         }
       }
 
-      if (!enemies_remaining) {
+      if (!enemies_remaining && enemies_in_current_group == 0) {
         {
           std::lock_guard<std::mutex> lock(game_state_mutex);
-          current_level++;
-          if (current_level > MAX_GAME_LEVELS) {
+          current_group++;
+
+          // Verificar si el juego está completado
+          int total_enemies =
+              (game_mode == 1) ? MODE1_TOTAL_ENEMIES : MODE2_TOTAL_ENEMIES;
+          if (enemies_destroyed >= total_enemies) {
             game_completed = true;
             game_running = false;
+          } else if (current_group >= GROUPS_PER_MODE) {
+            // Si completamos todos los grupos pero no todos los enemigos
+            current_group = 0; // Reiniciar grupos si es necesario
           }
+
           cv_level_complete.notify_all();
         }
-        reset_level();
+
+        if (game_running.load()) {
+          reset_level();
+        }
       }
     }
     std::this_thread::sleep_for(
@@ -505,22 +544,6 @@ void *game_state_monitor_thread(void *arg) {
 }
 
 /**
- * Hilo 10: Gestor de efectos visuales, el de daño
- */
-void *visual_effects_manager_thread(void *arg) {
-  (void)arg;
-  while (game_running.load()) {
-    if (player_hit.load()) {
-      if (now_ms() - damage_flash_start_ms >= DAMAGE_FLASH_DURATION_MS) {
-        player_hit = false;
-      }
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(UPDATE_INTERVAL_MS));
-  }
-  return nullptr;
-}
-
-/**
  * Hilo 9: Gestor de puntuación
  * Maneja la puntuación y otorga vidas bonus
  */
@@ -546,6 +569,23 @@ void *score_manager_thread(void *arg) {
 }
 
 /**
+ * Hilo 10: Gestor de efectos visuales
+ * Maneja efectos visuales como el parpadeo de daño
+ */
+void *visual_effects_manager_thread(void *arg) {
+  (void)arg;
+  while (game_running.load()) {
+    if (player_hit.load()) {
+      if (now_ms() - damage_flash_start_ms >= DAMAGE_FLASH_DURATION_MS) {
+        player_hit = false;
+      }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(UPDATE_INTERVAL_MS));
+  }
+  return nullptr;
+}
+
+/**
  * Dibuja la pantalla del juego con todos los elementos
  */
 void draw_screen() {
@@ -553,7 +593,9 @@ void draw_screen() {
   struct GameSnapshot {
     int score;
     int lives;
-    int level;
+    int mode;
+    int group;
+    int enemies_destroyed;
     int ship_x;
     int ship_y;
     bool is_hit;
@@ -566,7 +608,9 @@ void draw_screen() {
     std::lock_guard<std::mutex> lock(game_state_mutex);
     snapshot.score = player_score;
     snapshot.lives = player_lives;
-    snapshot.level = current_level;
+    snapshot.mode = game_mode;
+    snapshot.group = current_group + 1;
+    snapshot.enemies_destroyed = enemies_destroyed;
     snapshot.ship_x = ship_x;
     snapshot.ship_y = ship_y;
 
@@ -595,19 +639,19 @@ void draw_screen() {
     int hud_left = 2;
     int hud_best = screen_w / 2 - 12;
     int hud_lives = screen_w / 2 + 6;
-    int hud_level = screen_w - 12;
+    int hud_mode = screen_w - 15;
     if (hud_best < hud_left + 12)
       hud_best = hud_left + 12;
     if (hud_lives <= hud_best + 10)
       hud_lives = hud_best + 12;
-    if (hud_level <= hud_lives + 8)
-      hud_level = hud_lives + 10;
-    if (hud_level >= screen_w - 1)
-      hud_level = std::max(hud_lives + 6, screen_w - 12);
+    if (hud_mode <= hud_lives + 8)
+      hud_mode = hud_lives + 10;
+    if (hud_mode >= screen_w - 1)
+      hud_mode = std::max(hud_lives + 6, screen_w - 15);
     mvprintw(0, hud_left, "Puntaje: %d", snapshot.score);
     mvprintw(0, hud_best, "Mejor: %d", saved_highscore);
     mvprintw(0, hud_lives, "Vidas: %d", snapshot.lives);
-    mvprintw(0, hud_level, "Nivel: %d", snapshot.level);
+    mvprintw(0, hud_mode, "Modo %d G%d", snapshot.mode, snapshot.group);
     int sx = snapshot.ship_x - SHIP_W / 2;
     if (sx < 0)
       sx = 0;
@@ -643,7 +687,7 @@ void draw_screen() {
         ex = screen_w - ENEMY_W;
       if (has_colors())
         attron(COLOR_PAIR(2));
-      const char **art = enemy_art_for_level(snapshot.level);
+      const char **art = enemy_art_for_level(snapshot.mode);
       for (int r = 0; r < ENEMY_H; r++) {
         mvaddnstr(ey + r, ex, art[r], ENEMY_W);
       }
@@ -659,19 +703,20 @@ void draw_screen() {
   int bhud_left = 2;
   int bhud_best = screen_w / 2 - 12;
   int bhud_lives = screen_w / 2 + 6;
-  int bhud_level = screen_w - 12;
+  int bhud_mode = screen_w - 15;
   if (bhud_best < bhud_left + 12)
     bhud_best = bhud_left + 12;
   if (bhud_lives <= bhud_best + 10)
     bhud_lives = bhud_best + 12;
-  if (bhud_level <= bhud_lives + 8)
-    bhud_level = bhud_lives + 10;
-  if (bhud_level >= screen_w - 1)
-    bhud_level = std::max(bhud_lives + 6, screen_w - 12);
+  if (bhud_mode <= bhud_lives + 8)
+    bhud_mode = bhud_lives + 10;
+  if (bhud_mode >= screen_w - 1)
+    bhud_mode = std::max(bhud_lives + 6, screen_w - 15);
   mvwprintw(backwin, 0, bhud_left, "Puntaje: %d", snapshot.score);
   mvwprintw(backwin, 0, bhud_best, "Mejor: %d", saved_highscore);
   mvwprintw(backwin, 0, bhud_lives, "Vidas: %d", snapshot.lives);
-  mvwprintw(backwin, 0, bhud_level, "Nivel: %d", snapshot.level);
+  mvwprintw(backwin, 0, bhud_mode, "Modo %d G%d", snapshot.mode,
+            snapshot.group);
 
   // Centrar nave
   int ship_screen_x = snapshot.ship_x - SHIP_W / 2;
@@ -711,7 +756,7 @@ void draw_screen() {
       ex = screen_w - ENEMY_W;
     if (has_colors())
       wattron(backwin, COLOR_PAIR(2));
-    const char **art = enemy_art_for_level(snapshot.level);
+    const char **art = enemy_art_for_level(snapshot.mode);
     for (int r = 0; r < ENEMY_H; r++) {
       mvwaddnstr(backwin, ey + r, ex, art[r], ENEMY_W);
     }
@@ -822,10 +867,12 @@ bool show_gameover() {
   mvhline(by + 3, bx, '=', bw);
 
   // Estadisticas
-  mvprintw(by + 5, bx + 4, "Nivel alcanzado: %d/%d", current_level,
-           MAX_GAME_LEVELS);
+  int total_enemies =
+      (game_mode == 1) ? MODE1_TOTAL_ENEMIES : MODE2_TOTAL_ENEMIES;
+  mvprintw(by + 5, bx + 4, "Modo de juego: %d", game_mode);
   mvprintw(by + 6, bx + 4, "Puntaje final: %d", player_score);
-  mvprintw(by + 7, bx + 4, "Enemigos eliminados: %d", (player_score / 10));
+  mvprintw(by + 7, bx + 4, "Enemigos eliminados: %d/%d", enemies_destroyed,
+           total_enemies);
 
   auto hs = load_highscores();
   mvprintw(by + 9, bx + 4, "Puntuaciones mas altas:");
@@ -873,9 +920,12 @@ bool show_victory_screen() {
   mvhline(by + 7, bx, '-', bw);
 
   // Estadísticas
-  mvprintw(by + 9, bx + 4, "Niveles completados: %d/%d", MAX_GAME_LEVELS,
-           MAX_GAME_LEVELS);
+  int total_enemies =
+      (game_mode == 1) ? MODE1_TOTAL_ENEMIES : MODE2_TOTAL_ENEMIES;
+  mvprintw(by + 9, bx + 4, "Modo completado: %d", game_mode);
   mvprintw(by + 10, bx + 4, "Puntaje final: %d", player_score);
+  mvprintw(by + 11, bx + 4, "Enemigos eliminados: %d/%d", total_enemies,
+           total_enemies);
 
   auto hs = load_highscores();
   mvprintw(by + 12, bx + 4, "Mejores puntuaciones:");
@@ -906,6 +956,75 @@ enum MenuChoice {
   MENU_SCORES = 2,
   MENU_QUIT = 3
 };
+
+// Función para seleccionar el modo de juego
+int select_game_mode() {
+  nodelay(stdscr, FALSE);
+  keypad(stdscr, TRUE);
+  int choice = 0;
+  const char *items[] = {"Modo 1: 40 Alienígenas (5 grupos de 8)",
+                         "Modo 2: 50 Alienígenas (5 grupos de 10)"};
+  int nitems = 2;
+
+  while (true) {
+    getmaxyx(stdscr, screen_h, screen_w);
+    clear();
+    int box_w = std::min(70, screen_w - 4);
+    int box_x = std::max(2, (screen_w - box_w) / 2);
+    int y0 = 3;
+
+    mvhline(y0, box_x, '-', box_w);
+    const char *title = "SELECCIONAR MODO DE JUEGO";
+    int title_x = box_x + (box_w - static_cast<int>(std::strlen(title))) / 2;
+    title_x =
+        std::max(box_x + 1, std::min(title_x, box_x + box_w -
+                                                  (int)std::strlen(title) - 1));
+
+    attron(A_BOLD);
+    mvprintw(y0 + 1, title_x, "%s", title);
+    attroff(A_BOLD);
+    mvhline(y0 + 3, box_x, '-', box_w);
+
+    int start_y = y0 + 5;
+    for (int i = 0; i < nitems; i++) {
+      int y = start_y + i * 3;
+      int x = box_x + 4;
+      if (i == choice) {
+        attron(A_REVERSE | A_BOLD);
+        mvprintw(y, x, "%s", items[i]);
+        attroff(A_REVERSE | A_BOLD);
+      } else {
+        mvprintw(y, x, "%s", items[i]);
+      }
+    }
+
+    mvprintw(screen_h - 4, box_x + 2, "Descripción:");
+    if (choice == 0) {
+      mvprintw(
+          screen_h - 3, box_x + 4,
+          "40 alienígenas aparecen en 5 grupos de 8. Ganas destruyendo todos.");
+    } else {
+      mvprintw(screen_h - 3, box_x + 4,
+               "50 alienígenas aparecen en 5 grupos de 10. Ganas destruyendo "
+               "todos.");
+    }
+    mvprintw(
+        screen_h - 2, box_x + 2,
+        "Usa flechas para navegar. Enter para seleccionar. Q para volver.");
+    refresh();
+
+    int ch = getch();
+    if (ch == KEY_UP || ch == 'w' || ch == 'W') {
+      choice = (choice - 1 + nitems) % nitems;
+    } else if (ch == KEY_DOWN || ch == 's' || ch == 'S') {
+      choice = (choice + 1) % nitems;
+    } else if (ch == 10 || ch == KEY_ENTER) {
+      return choice + 1; // Retornar 1 o 2
+    } else if (ch == 'q' || ch == 'Q') {
+      return -1; // Volver al menú principal
+    }
+  }
+}
 
 int show_menu() {
   nodelay(stdscr, FALSE);
@@ -1038,44 +1157,118 @@ int main() {
       continue;
     }
 
-    init_game();
-    reset_level();
-
-    // Crear todos los hilos del juego
-    std::thread t_input, t_update;
-    std::thread t_player_bullet_mgr, t_enemy_bullet_mgr,
-        t_player_bullet_collision;
-    std::thread t_enemy_move, t_enemy_shoot;
-    std::thread t_enemy_bullet_collision, t_level_checker;
-    std::thread t_game_monitor, t_score_mgr, t_visual_effects;
-
-    game_running = true;
-
-    // Iniciar todos los hilos
-    t_input = std::thread(input_loop);
-    t_update = std::thread(update_loop);
-    t_player_bullet_mgr = std::thread(player_bullet_manager_thread, nullptr);
-    t_enemy_bullet_mgr = std::thread(enemy_bullet_manager_thread, nullptr);
-    t_player_bullet_collision =
-        std::thread(player_bullet_collision_thread, nullptr);
-    t_enemy_move = std::thread(enemy_movement_controller_thread, nullptr);
-    t_enemy_shoot = std::thread(enemy_shooting_controller_thread, nullptr);
-    t_enemy_bullet_collision =
-        std::thread(enemy_bullet_collision_thread, nullptr);
-    t_level_checker = std::thread(level_completion_checker_thread, nullptr);
-    t_game_monitor = std::thread(game_state_monitor_thread, nullptr);
-    t_score_mgr = std::thread(score_manager_thread, nullptr);
-    t_visual_effects = std::thread(visual_effects_manager_thread, nullptr);
-
-    // Bucle del juego
-    while (true) {
-      while (game_running.load()) {
-        draw_screen();
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(RENDER_INTERVAL_MS));
+    // Seleccionar modo de juego
+    if (choice == MENU_PLAY) {
+      int selected_mode = select_game_mode();
+      if (selected_mode == -1) {
+        continue; // Volver al menú principal
       }
 
-      // Unir todos los hilos
+      init_game();
+      init_game_mode(selected_mode);
+      reset_level();
+
+      // Crear todos los hilos del juego (10 hilos principales)
+      std::thread t_input, t_update;
+      std::thread t_player_bullet_mgr, t_enemy_bullet_mgr,
+          t_player_bullet_collision;
+      std::thread t_enemy_move, t_enemy_shoot;
+      std::thread t_enemy_bullet_collision, t_level_checker;
+      std::thread t_game_monitor, t_score_mgr, t_visual_effects;
+
+      game_running = true;
+
+      // Iniciar todos los hilos
+      t_input = std::thread(input_loop);
+      t_update = std::thread(update_loop);
+      t_player_bullet_mgr = std::thread(player_bullet_manager_thread, nullptr);
+      t_enemy_bullet_mgr = std::thread(enemy_bullet_manager_thread, nullptr);
+      t_player_bullet_collision =
+          std::thread(player_bullet_collision_thread, nullptr);
+      t_enemy_move = std::thread(enemy_movement_controller_thread, nullptr);
+      t_enemy_shoot = std::thread(enemy_shooting_controller_thread, nullptr);
+      t_enemy_bullet_collision =
+          std::thread(enemy_bullet_collision_thread, nullptr);
+      t_level_checker = std::thread(level_completion_checker_thread, nullptr);
+      t_game_monitor = std::thread(game_state_monitor_thread, nullptr);
+      t_score_mgr = std::thread(score_manager_thread, nullptr);
+      t_visual_effects = std::thread(visual_effects_manager_thread, nullptr);
+
+      // Bucle del juego
+      while (true) {
+        while (game_running.load()) {
+          draw_screen();
+          std::this_thread::sleep_for(
+              std::chrono::milliseconds(RENDER_INTERVAL_MS));
+        }
+
+        // Unir todos los hilos
+        if (t_input.joinable())
+          t_input.join();
+        if (t_update.joinable())
+          t_update.join();
+        if (t_player_bullet_mgr.joinable())
+          t_player_bullet_mgr.join();
+        if (t_enemy_bullet_mgr.joinable())
+          t_enemy_bullet_mgr.join();
+        if (t_player_bullet_collision.joinable())
+          t_player_bullet_collision.join();
+        if (t_enemy_move.joinable())
+          t_enemy_move.join();
+        if (t_enemy_shoot.joinable())
+          t_enemy_shoot.join();
+        if (t_enemy_bullet_collision.joinable())
+          t_enemy_bullet_collision.join();
+        if (t_level_checker.joinable())
+          t_level_checker.join();
+        if (t_game_monitor.joinable())
+          t_game_monitor.join();
+        if (t_score_mgr.joinable())
+          t_score_mgr.join();
+        if (t_visual_effects.joinable())
+          t_visual_effects.join();
+
+        draw_screen();
+        update_highscores_if_needed(player_score);
+        {
+          auto tmp = load_highscores();
+          saved_highscore = tmp.empty() ? 0 : tmp[0];
+        }
+
+        bool restart;
+        if (game_completed) {
+          restart = show_victory_screen();
+        } else {
+          restart = show_gameover();
+        }
+
+        if (!restart)
+          break;
+
+        // Reiniciar el juego pero mantener el mismo modo
+        init_game();
+        reset_level();
+        game_running = true;
+
+        // Reiniciar todos los hilos (10 hilos principales)
+        t_input = std::thread(input_loop);
+        t_update = std::thread(update_loop);
+        t_player_bullet_mgr =
+            std::thread(player_bullet_manager_thread, nullptr);
+        t_enemy_bullet_mgr = std::thread(enemy_bullet_manager_thread, nullptr);
+        t_player_bullet_collision =
+            std::thread(player_bullet_collision_thread, nullptr);
+        t_enemy_move = std::thread(enemy_movement_controller_thread, nullptr);
+        t_enemy_shoot = std::thread(enemy_shooting_controller_thread, nullptr);
+        t_enemy_bullet_collision =
+            std::thread(enemy_bullet_collision_thread, nullptr);
+        t_level_checker = std::thread(level_completion_checker_thread, nullptr);
+        t_game_monitor = std::thread(game_state_monitor_thread, nullptr);
+        t_score_mgr = std::thread(score_manager_thread, nullptr);
+        t_visual_effects = std::thread(visual_effects_manager_thread, nullptr);
+      }
+
+      // Finalizar (10 hilos principales)
       if (t_input.joinable())
         t_input.join();
       if (t_update.joinable())
@@ -1100,71 +1293,7 @@ int main() {
         t_score_mgr.join();
       if (t_visual_effects.joinable())
         t_visual_effects.join();
-
-      draw_screen();
-      update_highscores_if_needed(player_score);
-      {
-        auto tmp = load_highscores();
-        saved_highscore = tmp.empty() ? 0 : tmp[0];
-      }
-
-      bool restart;
-      if (game_completed) {
-        restart = show_victory_screen();
-      } else {
-        restart = show_gameover();
-      }
-
-      if (!restart)
-        break;
-
-      // Reiniciar el juego
-      init_game();
-      reset_level();
-      game_running = true;
-
-      // Reiniciar todos los hilos
-      t_input = std::thread(input_loop);
-      t_update = std::thread(update_loop);
-      t_player_bullet_mgr = std::thread(player_bullet_manager_thread, nullptr);
-      t_enemy_bullet_mgr = std::thread(enemy_bullet_manager_thread, nullptr);
-      t_player_bullet_collision =
-          std::thread(player_bullet_collision_thread, nullptr);
-      t_enemy_move = std::thread(enemy_movement_controller_thread, nullptr);
-      t_enemy_shoot = std::thread(enemy_shooting_controller_thread, nullptr);
-      t_enemy_bullet_collision =
-          std::thread(enemy_bullet_collision_thread, nullptr);
-      t_level_checker = std::thread(level_completion_checker_thread, nullptr);
-      t_game_monitor = std::thread(game_state_monitor_thread, nullptr);
-      t_score_mgr = std::thread(score_manager_thread, nullptr);
-      t_visual_effects = std::thread(visual_effects_manager_thread, nullptr);
-    }
-
-    // Finalizar
-    if (t_input.joinable())
-      t_input.join();
-    if (t_update.joinable())
-      t_update.join();
-    if (t_player_bullet_mgr.joinable())
-      t_player_bullet_mgr.join();
-    if (t_enemy_bullet_mgr.joinable())
-      t_enemy_bullet_mgr.join();
-    if (t_player_bullet_collision.joinable())
-      t_player_bullet_collision.join();
-    if (t_enemy_move.joinable())
-      t_enemy_move.join();
-    if (t_enemy_shoot.joinable())
-      t_enemy_shoot.join();
-    if (t_enemy_bullet_collision.joinable())
-      t_enemy_bullet_collision.join();
-    if (t_level_checker.joinable())
-      t_level_checker.join();
-    if (t_game_monitor.joinable())
-      t_game_monitor.join();
-    if (t_score_mgr.joinable())
-      t_score_mgr.join();
-    if (t_visual_effects.joinable())
-      t_visual_effects.join();
+    } // Cierre del bloque if
   }
 
   endwin();
