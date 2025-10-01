@@ -37,14 +37,17 @@ sudo apt install libncurses-dev
 
 ## Imagenes de funcionamiento: 
 
-### Nivel 1:
-<img width="650" alt="Nivel1" src="https://github.com/user-attachments/assets/be61f8c3-2c19-4fba-8761-c4b3e3302202" />
+### Menu principal
+<img width="650" alt="image" src="https://github.com/user-attachments/assets/522dc30d-6744-41c3-a104-94182ab6d603" />
 
-### Nivel 2: 
-<img width="650" alt="Nivel2" src="https://github.com/user-attachments/assets/865627db-a841-4d9a-8bf4-4fa56e9a6bb8" />
+### Seleccionar modo de juego
+<img width="650" alt="image" src="https://github.com/user-attachments/assets/62756437-ed2d-4b0b-a8f1-925a156c7120" />
 
-### Nivel 3: 
-<img width="650" alt="Nivel3" src="https://github.com/user-attachments/assets/101aca5b-0de8-40ec-9c62-1eec8aa4b366" />
+### Modo 1: 40 aliens
+<img width="650" alt="image" src="https://github.com/user-attachments/assets/45fc2f40-a344-4bd5-814c-736e8d080f29" />
 
-### Pantalla de victoria:
-<img width="650" alt="Ganaste" src="https://github.com/user-attachments/assets/bc9938ff-303e-4ce4-ba8e-94a427e49bf1" />
+### Modo 2: 50 aliens
+<img width="650" alt="image" src="https://github.com/user-attachments/assets/8d9c20f1-7031-4eec-8e81-6a986fd7013b" />
+
+### Pantalla de victoria
+<img width="650" alt="image" src="https://github.com/user-attachments/assets/19bdea64-97d1-46be-9698-41d943ce924d" />
